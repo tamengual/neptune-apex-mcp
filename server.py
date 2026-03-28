@@ -5,12 +5,13 @@ Exposes Neptune Apex aquarium controller functionality via MCP tools.
 
 import json
 import os
+import subprocess
+import sys
 
 import requests
 from mcp.server.fastmcp import FastMCP
 
 from apex_client import ApexClient
-from fusion_client import FusionClient
 
 # ── Configuration ──────────────────────────────────────────────────
 APEX_HOST = os.environ["APEX_HOST"]
@@ -22,33 +23,47 @@ FUSION_APEX_ID = os.environ.get("FUSION_APEX_ID", "")
 HA_URL = os.environ.get("HA_URL", "")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
-PARAM_HA_CONFIG = {
-    "Alkalinity": ("sensor.reef_manual_alkalinity", "Reef Alkalinity (Manual)", "dKH", "mdi:flask"),
-    "Calcium": ("sensor.reef_manual_calcium", "Reef Calcium (Manual)", "ppm", "mdi:flask"),
-    "Magnesium": ("sensor.reef_manual_magnesium", "Reef Magnesium (Manual)", "ppm", "mdi:flask"),
-    "Nitrate": ("sensor.reef_manual_nitrate", "Reef Nitrate (Manual)", "ppm", "mdi:test-tube"),
-    "Phosphate": ("sensor.reef_manual_phosphate", "Reef Phosphate (Manual)", "ppm", "mdi:test-tube"),
-    "Salinity": ("sensor.reef_manual_salinity", "Reef Salinity (Manual)", "ppt", "mdi:waves"),
-    "pH": ("sensor.reef_manual_ph", "Reef pH (Manual)", "pH", "mdi:ph"),
-    "Ammonia": ("sensor.reef_manual_ammonia", "Reef Ammonia (Manual)", "ppm", "mdi:alert-circle"),
-    "Nitrite": ("sensor.reef_manual_nitrite", "Reef Nitrite (Manual)", "ppm", "mdi:alert-circle"),
+PARAM_HA_MAP = {
+    "Alkalinity": ("input_number.water_alk_dkh", "input_datetime.last_log_alk"),
+    "Calcium": ("input_number.water_calcium", "input_datetime.last_log_calcium"),
+    "Magnesium": ("input_number.water_magnesium", "input_datetime.last_log_magnesium"),
+    "Nitrate": ("input_number.water_nitrate", "input_datetime.last_log_nitrate"),
+    "Phosphate": ("input_number.water_phosphate", "input_datetime.last_log_phosphate"),
+    "pH": ("input_number.water_ph", "input_datetime.last_log_ph"),
+    "Ammonia": ("input_number.water_ammonia_hanna", "input_datetime.last_log_ammonia_hanna"),
+    "Salinity": ("input_number.water_salinity", "input_datetime.last_log_salinity_hanna"),
 }
 
 client = ApexClient(APEX_HOST, APEX_USER, APEX_PASS)
-_fusion: FusionClient | None = None
+
+# Path to the Fusion subprocess helper (runs Playwright in a separate process
+# to avoid async event loop conflicts with FastMCP).
+_FUSION_SUBPROCESS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fusion_subprocess.py")
 
 
-def _get_fusion() -> FusionClient:
-    """Lazy-init the Fusion client (launches headless browser on first use)."""
-    global _fusion
-    if _fusion is None:
-        if not FUSION_APEX_ID:
-            raise RuntimeError(
-                "FUSION_APEX_ID not set. Find your Apex ID in the Fusion URL: "
-                "https://apexfusion.com/apex/<APEX_ID>"
-            )
-        _fusion = FusionClient(FUSION_USER, FUSION_PASS, FUSION_APEX_ID)
-    return _fusion
+def _call_fusion(command: str, *args: str) -> dict | list:
+    """Run a Fusion command in a separate process and return parsed JSON.
+
+    Playwright's sync_playwright() refuses to run when an async event loop
+    exists in the process (which FastMCP creates). Shelling out to a
+    separate Python process avoids this entirely.
+    """
+    if not FUSION_APEX_ID:
+        raise RuntimeError(
+            "FUSION_APEX_ID not set. Find your Apex ID in the Fusion URL: "
+            "https://apexfusion.com/apex/<APEX_ID>"
+        )
+    cmd = [sys.executable, _FUSION_SUBPROCESS, command, *[str(a) for a in args]]
+    env = {**os.environ, "FUSION_USER": FUSION_USER, "FUSION_PASS": FUSION_PASS, "FUSION_APEX_ID": FUSION_APEX_ID}
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        try:
+            return json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            raise RuntimeError(stderr or f"fusion_subprocess exited {result.returncode}")
+    return json.loads(result.stdout)
+
 
 mcp = FastMCP(
     "Neptune Apex",
@@ -342,6 +357,8 @@ def get_full_config() -> str:
 
 
 # ── Fusion Cloud Tools (manual measurements) ──────────────────────
+# All Fusion tools shell out to fusion_subprocess.py so Playwright's
+# sync API runs in its own process, avoiding async event loop conflicts.
 
 @mcp.tool()
 def get_manual_measurements(days: int = 365) -> str:
@@ -356,8 +373,7 @@ def get_manual_measurements(days: int = 365) -> str:
         days: Number of days of history (default: 365)
     """
     try:
-        fusion = _get_fusion()
-        entries = fusion.get_measurements(days)
+        entries = _call_fusion("measurements", days)
         return json.dumps(entries, indent=2)
     except Exception as e:
         return json.dumps({"error": f"Failed to fetch Fusion measurements: {e}"})
@@ -373,8 +389,7 @@ def get_manual_measurements_summary(days: int = 365) -> str:
         days: Number of days of history (default: 365)
     """
     try:
-        fusion = _get_fusion()
-        summary = fusion.get_measurements_summary(days)
+        summary = _call_fusion("summary", days)
         return json.dumps(summary, indent=2)
     except Exception as e:
         return json.dumps({"error": f"Failed to fetch Fusion summary: {e}"})
@@ -387,8 +402,7 @@ def get_latest_manual_measurements() -> str:
     Returns the latest NO3, PO4, Alk, Ca, Mg, Salinity, pH, Ammonia, Nitrite, etc.
     """
     try:
-        fusion = _get_fusion()
-        latest = fusion.get_latest_measurements()
+        latest = _call_fusion("latest")
         return json.dumps(latest, indent=2)
     except Exception as e:
         return json.dumps({"error": f"Failed to fetch latest measurements: {e}"})
@@ -398,43 +412,63 @@ def get_latest_manual_measurements() -> str:
 
 @mcp.tool()
 def sync_measurements_to_ha() -> str:
-    """Push the latest manually-logged Fusion measurements to Home Assistant as sensors.
+    """Push the latest manually-logged Fusion measurements to Home Assistant.
 
-    Creates/updates sensor entities (sensor.reef_manual_*) so they appear on HA dashboards.
+    Updates existing input_number and input_datetime helpers so the template
+    sensors (sensor.reef_alk, sensor.reef_calcium, etc.) reflect the latest
+    values with full history tracking.
+
     Call this after logging new water test results in Neptune Fusion.
 
     Requires HA_URL and HA_TOKEN environment variables.
     """
+    from datetime import datetime as dt
+
     if not HA_URL or not HA_TOKEN:
         return json.dumps({"error": "HA_URL and HA_TOKEN environment variables are required for HA sync."})
 
     try:
-        fusion = _get_fusion()
-        latest = fusion.get_latest_measurements()
+        latest = _call_fusion("latest")
     except Exception as e:
         return json.dumps({"error": f"Failed to fetch Fusion measurements: {e}"})
 
     headers = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
     results = {}
     for param_name, data in latest.items():
-        cfg = PARAM_HA_CONFIG.get(param_name)
-        if cfg is None:
+        mapping = PARAM_HA_MAP.get(param_name)
+        if mapping is None:
             continue
-        entity_id, friendly_name, unit, icon = cfg
-        payload = {
-            "state": data["value"],
-            "attributes": {
-                "friendly_name": friendly_name,
-                "unit_of_measurement": unit,
-                "icon": icon,
-                "device_class": "measurement",
-                "state_class": "measurement",
-                "last_tested": data["date"],
-                "source": "Neptune Fusion (manual)",
-            },
+        input_num, input_dt = mapping
+        value = float(data["value"])
+
+        # Set input_number value
+        r1 = requests.post(
+            f"{HA_URL}/api/services/input_number/set_value",
+            headers=headers,
+            json={"entity_id": input_num, "value": value},
+            timeout=10,
+        )
+
+        # Set input_datetime timestamp
+        try:
+            parsed = dt.fromisoformat(data["date"].replace("Z", "+00:00"))
+            dt_str = parsed.strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, KeyError):
+            dt_str = dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        r2 = requests.post(
+            f"{HA_URL}/api/services/input_datetime/set_datetime",
+            headers=headers,
+            json={"entity_id": input_dt, "datetime": dt_str},
+            timeout=10,
+        )
+
+        results[param_name] = {
+            "input_number": input_num,
+            "value": value,
+            "date": dt_str,
+            "ok": r1.status_code == 200 and r2.status_code == 200,
         }
-        r = requests.post(f"{HA_URL}/api/states/{entity_id}", headers=headers, json=payload, timeout=10)
-        results[param_name] = {"entity_id": entity_id, "value": data["value"], "ok": r.status_code in (200, 201)}
 
     return json.dumps({"synced": len(results), "details": results}, indent=2)
 
