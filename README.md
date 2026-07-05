@@ -26,17 +26,17 @@ Optionally integrates with **Neptune Fusion** cloud for manual water test histor
 ## Requirements
 
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
 - A Neptune Apex controller on your local network
-- `pip install -r requirements.txt`
-- For Fusion features: `playwright install chromium`
 
 ## Setup
 
 ### 1. Install dependencies
 
 ```bash
-pip install -r requirements.txt
-playwright install chromium  # only needed for Fusion cloud features
+uv sync                    # core dependencies
+uv sync --extra fusion     # include Fusion cloud support
+uv run playwright install chromium  # only needed for Fusion cloud features
 ```
 
 ### 2. Configure environment variables
@@ -67,8 +67,8 @@ cp .env.example .env
   "mcpServers": {
     "neptune-apex": {
       "type": "stdio",
-      "command": "python3",
-      "args": ["/path/to/neptune-apex-mcp/server.py"],
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/neptune-apex-mcp", "python", "server.py"],
       "env": {
         "APEX_HOST": "192.168.1.100",
         "APEX_USER": "admin",
@@ -85,8 +85,8 @@ cp .env.example .env
 {
   "mcpServers": {
     "neptune-apex": {
-      "command": "python3",
-      "args": ["/path/to/neptune-apex-mcp/server.py"],
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/neptune-apex-mcp", "python", "server.py"],
       "env": {
         "APEX_HOST": "192.168.1.100",
         "APEX_USER": "admin",
@@ -144,7 +144,7 @@ For scheduled syncing (e.g. every 6 hours), run the standalone script:
 ```bash
 export FUSION_USER=your_user FUSION_PASS=your_pass FUSION_APEX_ID=your_id
 export HA_URL=http://192.168.1.100:8123 HA_TOKEN=your_token
-python3 sync_fusion_to_ha.py
+uv run python sync_fusion_to_ha.py
 ```
 
 This creates/updates `sensor.reef_manual_*` entities in Home Assistant.
