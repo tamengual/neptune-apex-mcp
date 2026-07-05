@@ -63,6 +63,26 @@ class ApexClient:
         r.raise_for_status()
         return r.json()
 
+    def _post(self, path: str, data: dict) -> dict:
+        """Authenticated POST request with auto-retry on 401."""
+        self._ensure_auth()
+        r = self.session.post(
+            f"{self.base_url}{path}",
+            json=data,
+            headers={"Content-Type": "application/json"},
+            timeout=self.timeout,
+        )
+        if r.status_code == 401:
+            self._login()
+            r = self.session.post(
+                f"{self.base_url}{path}",
+                json=data,
+                headers={"Content-Type": "application/json"},
+                timeout=self.timeout,
+            )
+        r.raise_for_status()
+        return r.json()
+
     # ── Read endpoints ─────────────────────────────────────────────
 
     def get_status(self) -> dict:
@@ -134,6 +154,21 @@ class ApexClient:
         return status.get("power", {})
 
     # ── Write endpoints ────────────────────────────────────────────
+
+    def create_virtual_output(self, name: str, program: str = "Set OFF") -> dict:
+        """Create a new virtual output on the Apex.
+
+        Args:
+            name: Virtual output name (e.g. "vo_my_timer")
+            program: Initial Apex program (default: "Set OFF")
+        """
+        payload = {
+            "ctype": "Advanced",
+            "prog": program,
+            "log": False,
+            "name": name,
+        }
+        return self._post("/rest/config/oconf", payload)
 
     def set_output_state(self, name: str, state: str) -> dict:
         """Set an output to ON, OFF, or AUTO.

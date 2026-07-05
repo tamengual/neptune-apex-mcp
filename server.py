@@ -228,6 +228,24 @@ def get_outlet_program(name: str) -> str:
 
 
 @mcp.tool()
+def create_virtual_output(name: str, program: str = "Set OFF") -> str:
+    """Create a new virtual output on the Apex.
+
+    Virtual outputs are software-only outputs useful for timers, flags, and logic
+    that other outlets can reference in their programs.
+
+    Args:
+        name: Virtual output name (e.g. "vo_my_timer"). Convention: prefix with "vo_".
+        program: Initial Apex program (default: "Set OFF")
+    """
+    try:
+        result = client.create_virtual_output(name, program)
+        return json.dumps({"success": True, "outlet": name, "response": result})
+    except Exception as e:
+        return json.dumps({"error": f"Failed to create virtual output: {e}"})
+
+
+@mcp.tool()
 def set_outlet_state(name: str, state: str) -> str:
     """Set an outlet to ON, OFF, or AUTO.
 

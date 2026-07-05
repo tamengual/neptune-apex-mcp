@@ -114,6 +114,7 @@ cp .env.example .env
 | `get_all_outlets` | All outlet states |
 | `get_outlet` | Single outlet state |
 | `get_outlet_program` | Read an outlet's Apex program |
+| `create_virtual_output` | Create a virtual output for timers, flags, and logic |
 | `set_outlet_state` | Set outlet to ON, OFF, or AUTO |
 | `set_outlet_program` | Write a new Apex program to an outlet |
 
