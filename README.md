@@ -2,7 +2,7 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server for the **Neptune Systems Apex** aquarium controller. Gives AI assistants like Claude full read/write access to your Apex — probe readings, outlet control, program editing, feed cycles, and more.
 
-Optionally integrates with **Neptune Fusion** cloud for manual water test history, and **Home Assistant** for syncing measurements as sensor entities.
+Optionally integrates with **Neptune Fusion** cloud for manual water test history and alarm logs, and **Home Assistant** for syncing measurements as sensor entities.
 
 ## Features
 
@@ -17,7 +17,7 @@ Optionally integrates with **Neptune Fusion** cloud for manual water test histor
 ### Neptune Fusion Cloud (optional)
 - Fetch manually-logged water test measurements (NO3, PO4, Alk, Ca, Mg, Salinity, pH, Ammonia, Nitrite)
 - Measurement summaries and latest values
-- Uses Playwright headless browser for auth (Neptune doesn't offer a public API)
+- Alarm log (trigger and clear events by date)
 
 ### Home Assistant Integration (optional)
 - Push Fusion manual measurements to HA as sensor entities
@@ -34,9 +34,7 @@ Optionally integrates with **Neptune Fusion** cloud for manual water test histor
 ### 1. Install dependencies
 
 ```bash
-uv sync                    # core dependencies
-uv sync --extra fusion     # include Fusion cloud support
-uv run playwright install chromium  # only needed for Fusion cloud features
+uv sync
 ```
 
 ### 2. Configure environment variables
@@ -67,8 +65,8 @@ cp .env.example .env
   "mcpServers": {
     "neptune-apex": {
       "type": "stdio",
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/neptune-apex-mcp", "python", "server.py"],
+      "command": "/path/to/neptune-apex-mcp/.venv/bin/python3",
+      "args": ["/path/to/neptune-apex-mcp/server.py"],
       "env": {
         "APEX_HOST": "192.168.1.100",
         "APEX_USER": "admin",
@@ -85,8 +83,8 @@ cp .env.example .env
 {
   "mcpServers": {
     "neptune-apex": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/neptune-apex-mcp", "python", "server.py"],
+      "command": "/path/to/neptune-apex-mcp/.venv/bin/python3",
+      "args": ["/path/to/neptune-apex-mcp/server.py"],
       "env": {
         "APEX_HOST": "192.168.1.100",
         "APEX_USER": "admin",
@@ -135,6 +133,7 @@ cp .env.example .env
 | `get_manual_measurements` | Manual water test history from Fusion |
 | `get_manual_measurements_summary` | Summary stats per parameter |
 | `get_latest_manual_measurements` | Most recent value per parameter |
+| `get_alarm_log` | Alarm events (triggers and clears) by date |
 | `sync_measurements_to_ha` | Push measurements to Home Assistant |
 
 ## Standalone Fusion-to-HA Sync

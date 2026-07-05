@@ -1,13 +1,12 @@
 """Neptune Fusion cloud API client.
 
-Uses Playwright headless browser for authentication (Neptune blocks
-programmatic login) then fetches data via in-page JavaScript fetch().
+Uses requests with CSRF token authentication.
 """
 
-import json
+import re
 import time
 
-from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+import requests
 
 
 class FusionClient:
@@ -21,92 +20,70 @@ class FusionClient:
         self.username = username
         self.password = password
         self.apex_id = apex_id
-        self._playwright = None
-        self._browser: Browser | None = None
-        self._context: BrowserContext | None = None
-        self._page: Page | None = None
+        self.session = requests.Session()
         self._logged_in = False
 
-    def _ensure_browser(self) -> None:
-        """Launch browser and log in if needed."""
-        if self._page is not None and self._logged_in:
-            return
-
-        if self._playwright is None:
-            self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=True)
-
-        if self._context is None:
-            self._context = self._browser.new_context()
-
-        if self._page is None:
-            self._page = self._context.new_page()
-
-        self._login()
-
     def _login(self) -> None:
-        """Log into Fusion via the browser."""
-        self._page.goto(f"{self.FUSION_URL}/login")
-        self._page.wait_for_selector("#index-login-username", timeout=15000)
-        self._page.fill("#index-login-username", self.username)
-        self._page.fill("#index-login-password", self.password)
-        self._page.click('button[type="submit"]')
-        self._page.wait_for_timeout(3000)
+        """Authenticate via CSRF token + POST to /login."""
+        r = self.session.get(f"{self.FUSION_URL}/login", timeout=15)
+        r.raise_for_status()
+        match = re.search(r'csrf-token"\s+content="([^"]+)"', r.text)
+        if not match:
+            raise RuntimeError("Could not find CSRF token on Fusion login page")
+        csrf = match.group(1)
+
+        r = self.session.post(
+            f"{self.FUSION_URL}/login",
+            json={"username": self.username, "password": self.password},
+            headers={
+                "Content-Type": "application/json",
+                "X-CSRF-Token": csrf,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if "username" not in data:
+            raise RuntimeError(f"Fusion login failed: {data}")
         self._logged_in = True
 
-    def _fetch_json(self, path: str) -> list | dict:
-        """Fetch a Fusion API endpoint from within the authenticated page context."""
-        self._ensure_browser()
-        url = f"/api/apex/{self.apex_id}{path}"
-        result = self._page.evaluate(
-            """(url) => fetch(url, {
-                credentials: 'include',
-                headers: {'X-Requested-With': 'XMLHttpRequest'}
-            }).then(r => {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                return r.text();
-            })""",
+    def _ensure_auth(self) -> None:
+        if not self._logged_in:
+            self._login()
+
+    def _get(self, path: str) -> list | dict:
+        """Authenticated GET to a Fusion API endpoint."""
+        self._ensure_auth()
+        url = f"{self.FUSION_URL}/api/apex/{self.apex_id}{path}"
+        sep = "&" if "?" in path else "?"
+        url += f"{sep}_={int(time.time())}"
+        r = self.session.get(
             url,
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            timeout=15,
         )
-        if not result or result.startswith("<!"):
+        if r.status_code == 401:
             self._logged_in = False
-            self._ensure_browser()
-            result = self._page.evaluate(
-                """(url) => fetch(url, {
-                    credentials: 'include',
-                    headers: {'X-Requested-With': 'XMLHttpRequest'}
-                }).then(r => {
-                    if (!r.ok) throw new Error('HTTP ' + r.status);
-                    return r.text();
-                })""",
+            self._ensure_auth()
+            r = self.session.get(
                 url,
+                headers={"X-Requested-With": "XMLHttpRequest"},
+                timeout=15,
             )
-        return json.loads(result)
+        r.raise_for_status()
+        return r.json()
 
     def close(self) -> None:
-        """Clean up browser resources."""
-        if self._browser:
-            self._browser.close()
-        if self._playwright:
-            self._playwright.stop()
-        self._page = None
-        self._context = None
-        self._browser = None
-        self._playwright = None
+        """Clean up session."""
+        self.session.close()
         self._logged_in = False
 
     # ── API methods ────────────────────────────────────────────────
 
     def get_measurements(self, days: int = 365) -> list[dict]:
-        """Get manual measurement log entries.
-
-        Args:
-            days: Number of days of history to fetch (default: 365)
-
-        Returns:
-            List of measurement entries with date, type, name, value.
-        """
-        raw = self._fetch_json(f"/mlog?days={days}")
+        """Get manual measurement log entries."""
+        raw = self._get(f"/mlog?days={days}")
         results = []
         for entry in raw:
             mtype = entry.get("type", 0)
@@ -156,3 +133,20 @@ class FusionClient:
                 "date": entry["date"],
             }
         return latest
+
+    def get_alarm_log(self, date: str, page: int = 1, per_page: int = 50) -> dict:
+        """Get alarm log entries for a specific date.
+
+        Args:
+            date: ISO date string (e.g. "2026-07-05T04:00:00.000Z")
+            page: Page number (default: 1)
+            per_page: Results per page (default: 50)
+
+        Returns:
+            Dict with "total_entries" and "entries" list.
+        """
+        raw = self._get(f"/alog?date={date}&page={page}&per_page={per_page}")
+        return {
+            "total_entries": raw[0]["total_entries"],
+            "entries": raw[1],
+        }
