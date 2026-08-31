@@ -2,7 +2,7 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server for the **Neptune Systems Apex** aquarium controller. Gives AI assistants like Claude full read/write access to your Apex — probe readings, outlet control, program editing, feed cycles, and more.
 
-Optionally integrates with **Neptune Fusion** cloud for manual water test history, and **Home Assistant** for syncing measurements as sensor entities.
+Optionally integrates with **Neptune Fusion** cloud for manual water test history and alarm logs, and **Home Assistant** for syncing measurements as sensor entities.
 
 ## Features
 
@@ -17,7 +17,7 @@ Optionally integrates with **Neptune Fusion** cloud for manual water test histor
 ### Neptune Fusion Cloud (optional)
 - Fetch manually-logged water test measurements (NO3, PO4, Alk, Ca, Mg, Salinity, pH, Ammonia, Nitrite)
 - Measurement summaries and latest values
-- Uses Playwright headless browser for auth (Neptune doesn't offer a public API)
+- Alarm log (trigger and clear events by date)
 
 ### Home Assistant Integration (optional)
 - Push Fusion manual measurements to HA as sensor entities
@@ -26,17 +26,15 @@ Optionally integrates with **Neptune Fusion** cloud for manual water test histor
 ## Requirements
 
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
 - A Neptune Apex controller on your local network
-- `pip install -r requirements.txt`
-- For Fusion features: `playwright install chromium`
 
 ## Setup
 
 ### 1. Install dependencies
 
 ```bash
-pip install -r requirements.txt
-playwright install chromium  # only needed for Fusion cloud features
+uv sync
 ```
 
 ### 2. Configure environment variables
@@ -67,7 +65,7 @@ cp .env.example .env
   "mcpServers": {
     "neptune-apex": {
       "type": "stdio",
-      "command": "python3",
+      "command": "/path/to/neptune-apex-mcp/.venv/bin/python3",
       "args": ["/path/to/neptune-apex-mcp/server.py"],
       "env": {
         "APEX_HOST": "192.168.1.100",
@@ -85,7 +83,7 @@ cp .env.example .env
 {
   "mcpServers": {
     "neptune-apex": {
-      "command": "python3",
+      "command": "/path/to/neptune-apex-mcp/.venv/bin/python3",
       "args": ["/path/to/neptune-apex-mcp/server.py"],
       "env": {
         "APEX_HOST": "192.168.1.100",
@@ -114,6 +112,7 @@ cp .env.example .env
 | `get_all_outlets` | All outlet states |
 | `get_outlet` | Single outlet state |
 | `get_outlet_program` | Read an outlet's Apex program |
+| `create_virtual_output` | Create a virtual output for timers, flags, and logic |
 | `set_outlet_state` | Set outlet to ON, OFF, or AUTO |
 | `set_outlet_program` | Write a new Apex program to an outlet |
 
@@ -134,6 +133,7 @@ cp .env.example .env
 | `get_manual_measurements` | Manual water test history from Fusion |
 | `get_manual_measurements_summary` | Summary stats per parameter |
 | `get_latest_manual_measurements` | Most recent value per parameter |
+| `get_alarm_log` | Alarm events (triggers and clears) by date |
 | `sync_measurements_to_ha` | Push measurements to Home Assistant |
 
 ## Standalone Fusion-to-HA Sync
@@ -143,7 +143,7 @@ For scheduled syncing (e.g. every 6 hours), run the standalone script:
 ```bash
 export FUSION_USER=your_user FUSION_PASS=your_pass FUSION_APEX_ID=your_id
 export HA_URL=http://192.168.1.100:8123 HA_TOKEN=your_token
-python3 sync_fusion_to_ha.py
+uv run python sync_fusion_to_ha.py
 ```
 
 This creates/updates `sensor.reef_manual_*` entities in Home Assistant.

@@ -5,13 +5,12 @@ Exposes Neptune Apex aquarium controller functionality via MCP tools.
 
 import json
 import os
-import subprocess
-import sys
 
 import requests
 from mcp.server.fastmcp import FastMCP
 
 from apex_client import ApexClient
+from fusion_client import FusionClient
 
 # ── Configuration ──────────────────────────────────────────────────
 APEX_HOST = os.environ["APEX_HOST"]
@@ -36,33 +35,20 @@ PARAM_HA_MAP = {
 
 client = ApexClient(APEX_HOST, APEX_USER, APEX_PASS)
 
-# Path to the Fusion subprocess helper (runs Playwright in a separate process
-# to avoid async event loop conflicts with FastMCP).
-_FUSION_SUBPROCESS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fusion_subprocess.py")
+_fusion: FusionClient | None = None
 
 
-def _call_fusion(command: str, *args: str) -> dict | list:
-    """Run a Fusion command in a separate process and return parsed JSON.
-
-    Playwright's sync_playwright() refuses to run when an async event loop
-    exists in the process (which FastMCP creates). Shelling out to a
-    separate Python process avoids this entirely.
-    """
-    if not FUSION_APEX_ID:
-        raise RuntimeError(
-            "FUSION_APEX_ID not set. Find your Apex ID in the Fusion URL: "
-            "https://apexfusion.com/apex/<APEX_ID>"
-        )
-    cmd = [sys.executable, _FUSION_SUBPROCESS, command, *[str(a) for a in args]]
-    env = {**os.environ, "FUSION_USER": FUSION_USER, "FUSION_PASS": FUSION_PASS, "FUSION_APEX_ID": FUSION_APEX_ID}
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        try:
-            return json.loads(result.stdout)
-        except (json.JSONDecodeError, ValueError):
-            raise RuntimeError(stderr or f"fusion_subprocess exited {result.returncode}")
-    return json.loads(result.stdout)
+def _get_fusion() -> FusionClient:
+    """Get or create the Fusion client (lazy init)."""
+    global _fusion
+    if _fusion is None:
+        if not FUSION_APEX_ID:
+            raise RuntimeError(
+                "FUSION_APEX_ID not set. Find your Apex ID in the Fusion URL: "
+                "https://apexfusion.com/apex/<APEX_ID>"
+            )
+        _fusion = FusionClient(FUSION_USER, FUSION_PASS, FUSION_APEX_ID)
+    return _fusion
 
 
 mcp = FastMCP(
@@ -228,6 +214,24 @@ def get_outlet_program(name: str) -> str:
 
 
 @mcp.tool()
+def create_virtual_output(name: str, program: str = "Set OFF") -> str:
+    """Create a new virtual output on the Apex.
+
+    Virtual outputs are software-only outputs useful for timers, flags, and logic
+    that other outlets can reference in their programs.
+
+    Args:
+        name: Virtual output name (e.g. "vo_my_timer"). Convention: prefix with "vo_".
+        program: Initial Apex program (default: "Set OFF")
+    """
+    try:
+        result = client.create_virtual_output(name, program)
+        return json.dumps({"success": True, "outlet": name, "response": result})
+    except Exception as e:
+        return json.dumps({"error": f"Failed to create virtual output: {e}"})
+
+
+@mcp.tool()
 def set_outlet_state(name: str, state: str) -> str:
     """Set an outlet to ON, OFF, or AUTO.
 
@@ -356,9 +360,7 @@ def get_full_config() -> str:
     return json.dumps(config, indent=2)
 
 
-# ── Fusion Cloud Tools (manual measurements) ──────────────────────
-# All Fusion tools shell out to fusion_subprocess.py so Playwright's
-# sync API runs in its own process, avoiding async event loop conflicts.
+# ── Fusion Cloud Tools ─────────────────────────────────────────────
 
 @mcp.tool()
 def get_manual_measurements(days: int = 365) -> str:
@@ -367,13 +369,11 @@ def get_manual_measurements(days: int = 365) -> str:
     These are tests you logged yourself (not from Trident or probes) — e.g. NO3, PO4,
     manual Alk/Ca/Mg, Salinity, pH, Ammonia, Nitrite.
 
-    Note: First call launches a headless browser for Fusion auth (~10 seconds).
-
     Args:
         days: Number of days of history (default: 365)
     """
     try:
-        entries = _call_fusion("measurements", days)
+        entries = _get_fusion().get_measurements(days)
         return json.dumps(entries, indent=2)
     except Exception as e:
         return json.dumps({"error": f"Failed to fetch Fusion measurements: {e}"})
@@ -389,7 +389,7 @@ def get_manual_measurements_summary(days: int = 365) -> str:
         days: Number of days of history (default: 365)
     """
     try:
-        summary = _call_fusion("summary", days)
+        summary = _get_fusion().get_measurements_summary(days)
         return json.dumps(summary, indent=2)
     except Exception as e:
         return json.dumps({"error": f"Failed to fetch Fusion summary: {e}"})
@@ -402,10 +402,30 @@ def get_latest_manual_measurements() -> str:
     Returns the latest NO3, PO4, Alk, Ca, Mg, Salinity, pH, Ammonia, Nitrite, etc.
     """
     try:
-        latest = _call_fusion("latest")
+        latest = _get_fusion().get_latest_measurements()
         return json.dumps(latest, indent=2)
     except Exception as e:
         return json.dumps({"error": f"Failed to fetch latest measurements: {e}"})
+
+
+@mcp.tool()
+def get_alarm_log(date: str = "") -> str:
+    """Get alarm log entries from Neptune Fusion cloud.
+
+    Returns alarm events (triggers and clears) for a given date.
+
+    Args:
+        date: ISO date string (e.g. "2026-07-05T04:00:00.000Z"). Defaults to today.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        if not date:
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%dT04:00:00.000Z")
+        result = _get_fusion().get_alarm_log(date)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch alarm log: {e}"})
 
 
 # ── HA Sync Tool ──────────────────────────────────────────────────
@@ -428,7 +448,7 @@ def sync_measurements_to_ha() -> str:
         return json.dumps({"error": "HA_URL and HA_TOKEN environment variables are required for HA sync."})
 
     try:
-        latest = _call_fusion("latest")
+        latest = _get_fusion().get_latest_measurements()
     except Exception as e:
         return json.dumps({"error": f"Failed to fetch Fusion measurements: {e}"})
 
